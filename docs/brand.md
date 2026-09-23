@@ -1,0 +1,7 @@
+# GIP · 집 — official brand
+
+White, black, pale gray, occasional cream. Minimal 80%, quiet doodle accents 20%. Baseball schedules, scores, standings and records remain primary. Uppercase GIP wordmark only; no roof, house, bat or ball attached to the lettering. Black and white variants. Korean slogan: 야구가 있는 곳, 어디든 우리 집. English: Same Baseball, Different Days, Always Our Home.
+
+Woori (우리) is a low, wide white blanket-like creature, not an animal. Preserve the face, short limbs, proportions, blush and fine imperfect linework. Never redraw into another style or human proportions. The original user-supplied sheet lives at public/brand/woori-reference.jpeg and must remain unchanged. app/woori.tsx displays individual regions from it. Use small accents on home; empty records and My/player detail are primary companion surfaces. Never substitute emoji or generated approximations for Woori.
+
+Growth derives from saved reviews (both kinds): 0/1/3/7/15/30/50/100. These are implementation defaults, visible in the player detail. Edits do not increment; deleted records no longer count. No separate growth state, no fake unlocks. Profile reviews retain the existing browser-local storage behavior. Levels: 야구 새싹 / 공과 친구 / 캐치볼 연습 / 유니폼 준비 / 리틀야구 / 유소년 선수 / 신인 선수 / 프로 야구선수. Equipment changes, body does not. Locked poses are revealed at their threshold. Home celebrates a favorite team's final win, hides for loss, and otherwise waits quietly. Never infer outcomes from scheduled or unavailable scores.
