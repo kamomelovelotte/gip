@@ -20,10 +20,19 @@ export const LEGACY_LEAGUE_NAMES: Record<string, League> = {
  '미국 여자야구':'WPBL'
 };
 export type Team = { id: string; league: League; name: string; short: string; group: string };
-export type Game = { id: string; league: League; date: string; startsAt: string; awayId: string; homeId: string; venue: string; status: 'scheduled' | 'final' | 'in_progress' | 'postponed'; awayScore: number | null; homeScore: number | null; timeTBD?: boolean; statusLabel?: string; inning?: string };
+export type Game = { id: string; league: League; date: string; startsAt: string; awayId: string; homeId: string; venue: string; status: 'scheduled' | 'final' | 'in_progress' | 'postponed'; awayScore: number | null; homeScore: number | null; timeTBD?: boolean; statusLabel?: string; inning?: string; sourceUrl?:string };
+export type LineupPlayer = { id:string; name:string; order:number; position:string; number?:string; hand?:string };
+export type StartingLineup = { batters:LineupPlayer[]; pitcher:LineupPlayer|null; announced:boolean };
+export type RelayEvent = { id:string; order:number; inning:number; half:'top'|'bottom'|null; text:string; time?:string; atBatId?:string; sourceIndex?:string; heading?:string; pitchNumber?:number; kind?:'pitch'|'result'|'substitution'|'info'|'heading'; batter?:{name:string;order?:number;average?:string;stats?:{label:string;value:number}[]}; pitcher?:string; outs?:number; pitch?:{result:string;type?:string;speedKph?:number;balls?:number;strikes?:number} };
+export type InningScore = { inning:number; away:string; home:string };
+export type GameDetail = { game:Game; awayName:string; homeName:string; lineups:{away:StartingLineup;home:StartingLineup}; innings:InningScore[]; relay:RelayEvent[]; relayInning:number|null; relayAvailable:boolean; source:string; sourceUrl:string; updatedAt:string; warnings:string[] };
 export type Standing = { teamId: string; group?: string; played: number; wins: number; losses: number; draws: number; percentage: number; gamesBehind: number };
-export type Profile = { id: string; gipCode: string; nickname: string; teamIds: string[]; leagues: League[]; notifications: { start: boolean; final: boolean }; createdAt: string };
+export type Profile = { id: string; gipCode: string; nickname: string; teamIds: string[]; leagues: League[]; createdAt: string };
 export type Review = { id: string; userId: string; kind: 'line' | 'visit'; gameId: string | null; date: string; matchup: string; venue: string; content: string; seat: string; photoData?: string; photoName?: string; createdAt: string; updatedAt: string };
 export type ReviewInput = Omit<Review, 'id' | 'userId' | 'createdAt' | 'updatedAt'>;
 export interface BaseballRepository { getTeams(): Promise<Team[]>; getGames(date: string): Promise<Game[]>; getStandings(league: League, season?: number): Promise<Standing[]>; }
 export interface UserRepository { current(): Promise<Profile | null>; signUp(nickname: string, password: string): Promise<Profile>; signIn(code: string, password: string): Promise<Profile>; signOut(): Promise<void>; update(profile: Profile): Promise<Profile>; reviews(): Promise<Review[]>; saveReview(input: ReviewInput, id?: string): Promise<Review>; deleteReview(id: string): Promise<void>; }
+
+export type StatPlayer={id:string;name:string;position:string;order?:string;stats:Record<string,string>};
+export type BoxscoreTeam={batters:StatPlayer[];pitchers:StatPlayer[]};
+export type GameBoxscore={away:BoxscoreTeam;home:BoxscoreTeam;status:"available"|"pending"|"unsupported";sourceUrl:string;updatedAt:string};
