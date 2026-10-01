@@ -1,3 +1,3 @@
-import type { NextConfig } from "next";
-const config: NextConfig = { devIndicators: false, trailingSlash: true, images: { unoptimized: true }, allowedDevOrigins: ["terminal.local"] };
+import type {NextConfig} from "next";
+const config:NextConfig={devIndicators:false,images:{unoptimized:true}};
 export default config;

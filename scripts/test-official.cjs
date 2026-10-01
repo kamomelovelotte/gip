@@ -1,0 +1,16 @@
+const fs=require('node:fs'),Module=require('node:module'),path=require('node:path'),assert=require('node:assert/strict'),ts=require('typescript');
+const root=path.resolve(__dirname,'..'),resolve=Module._resolveFilename;Module._resolveFilename=function(name,...args){return resolve.call(this,name.startsWith('@/')?root+'/'+name.slice(2):name,...args)};Module._extensions['.ts']=(m,file)=>m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,file);
+const official=require('../lib/gip/server/official-baseball.ts'),fixtures=require('./fixtures/official-pages.json');
+assert.equal(official.localToKorea('2026-04-11','18:00','Europe/Berlin'),'2026-04-12T01:00:00+09:00');
+assert.equal(official.localToKorea('2026-01-11','18:00','Europe/Berlin'),'2026-01-12T02:00:00+09:00');
+assert.equal(official.localToKorea('2026-10-04','13:30','America/Havana'),'2026-10-05T02:30:00+09:00');
+const dbl=official.parseDblSchedule(fixtures['dbl-schedule']);assert.equal(dbl[0].id,'official-dbl-59501');assert.equal(dbl[0].homeId,'dbl-5');assert.equal(dbl[0].awayId,'dbl-1');assert.equal(dbl[0].homeScore,8);assert.equal(dbl[0].awayScore,1);assert.equal(dbl[0].date,'2026-04-12');assert.equal(dbl[0].venue,'Astroturf im Ahorn-Ballpark');
+const standings=official.parseDblStandings(fixtures['dbl-table'],2026,'북부');assert.equal(standings[0].wins,17);assert.equal(standings[0].teamId,'dbl-0');assert.throws(()=>official.parseDblStandings(fixtures['dbl-table'],2025,'북부'),/2025/);
+const cz=official.parseCzechSchedule(fixtures['cz-all'],2026);assert.equal(cz[0].homeId,'extraliga-5');assert.equal(cz[0].homeScore,3);assert.equal(cz[0].awayScore,2);assert.equal(cz[0].startsAt,'2026-04-11T02:00:00+09:00');
+const czStandings=official.parseCzechStandings(fixtures['cz-regular'],2026);assert.equal(czStandings[0].wins,26);assert.equal(czStandings[0].losses,9);assert.equal(czStandings[0].percentage,.743);
+const cuba=official.parseCubaSchedule(fixtures['cuba-calendar'],'2026-10-05');assert.equal(cuba.length,8);assert.equal(cuba[0].awayId,'snb-3');assert.equal(cuba[0].homeId,'snb-1');assert.equal(cuba[0].status,'scheduled');assert.equal(cuba[0].homeScore,null);assert.equal(cuba[0].startsAt,'2026-10-05T02:30:00+09:00');
+assert.throws(()=>official.parseDblSchedule('<html>blocked</html>'),/일정/);assert.throws(()=>official.parseCzechSchedule('<html>blocked</html>',2026),/공식/);assert.throws(()=>official.parseDblSchedule(fixtures['dbl-schedule'].replaceAll('Cologne Cardinals','Unknown Team')),/팀 정보/);
+console.log('PASS: actual official HTML; home/away scores; stable team IDs; stadium; season validation; Europe/Cuba summer time; KST date rollover; source failures stay failures');
+if(process.env.GIP_LIVE==='1')Promise.allSettled([
+ official.dblSchedule('2026-04-12'),official.dblStandings(2026),official.czechSchedule('2026-04-11'),official.czechStandings(2026),official.officialSchedule('SNB','2026-10-05')
+]).then(results=>{results.forEach((r,i)=>{console.log(['DBL schedule','DBL standings','Czech schedule','Czech standings','Cuba schedule'][i],r.status==='fulfilled'?{count:r.value.length,first:r.value[0]}:String(r.reason));if(r.status==='rejected')process.exitCode=1;});});
