@@ -1,12 +1,14 @@
 import {sameOrigin} from './same-origin';
 import {z} from 'zod';
-import {database,photos,StorageConfigurationError} from './account-store';
+import {database,accountTransaction,photos,StorageConfigurationError} from './account-store';
 import {LEAGUES,type Profile,type Review} from '../types';
 import {TEAMS} from '../catalog';
 const cookieName='gip_session',encoder=new TextEncoder();
+const sessionLifetime=30*86400;
 const codeSchema=z.string().transform(s=>s.toUpperCase().replace(/[-\s]/g,'')).pipe(z.string().regex(/^[A-Z0-9]{5,9}$/));
 const passwordSchema=z.string().min(8).max(128);
-const prefs=z.object({nickname:z.string().trim().min(1).max(20),teamIds:z.array(z.string()).max(300).transform(ids=>[...new Set(ids.filter(id=>TEAMS.some(t=>t.id===id)))]),leagues:z.array(z.enum(LEAGUES)).max(40)});
+const nicknameSchema=z.string().trim().min(1).max(20);
+const prefs=z.object({nickname:nicknameSchema,teamIds:z.array(z.string()).max(300).transform(ids=>[...new Set(ids.filter(id=>TEAMS.some(t=>t.id===id)))]),leagues:z.array(z.enum(LEAGUES)).max(40)});
 const reviewSchema=z.object({kind:z.enum(['line','visit']),gameId:z.string().max(80).nullable(),date:z.string().regex(/^\d{4}-\d{2}-\d{2}$/),matchup:z.string().trim().min(1).max(100),venue:z.string().max(100),content:z.string().trim().min(1).max(3000),seat:z.string().max(100),photoData:z.string().max(2100000).optional(),photoName:z.string().max(200).optional()}).refine(r=>r.kind!=='line'||r.content.length<=100,{message:'한줄평은 100자까지 입력할 수 있어요.'});
 type Account={id:string;code:string;salt:string;password_hash:string;profile:string};
 // Read current fields only, while keeping older accounts and their records intact.
@@ -18,9 +20,71 @@ export async function passwordHash(password:string,salt:string){const key=await 
 function equal(a:string,b:string){let diff=a.length^b.length;for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^(b.charCodeAt(i)||0);return diff===0;}
 function token(request:Request){return request.headers.get('cookie')?.split(';').map(s=>s.trim()).find(s=>s.startsWith(cookieName+'='))?.slice(cookieName.length+1)??'';}
 function json(value:unknown,status=200,cookie?:string){return Response.json(value,{status,headers:{'Cache-Control':'no-store',...(cookie?{'Set-Cookie':cookie}:{})}});}
-function sessionCookie(value:string,maxAge:number){return `${cookieName}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;}
+function sessionCookie(value:string,maxAge:number){const expires=new Date(maxAge?Date.now()+maxAge*1000:0).toUTCString();return `${cookieName}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}; Expires=${expires}`;}
 export async function authenticate(request:Request){const raw=token(request);if(!/^[a-f0-9]{64}$/.test(raw))return null;return database().prepare('SELECT a.* FROM accounts a JOIN sessions s ON s.user_id=a.id WHERE s.token_hash=? AND s.expires>?').bind(await hash(raw),Date.now()).first<Account>();}
-async function signInResponse(account:Account,request:Request){const db=database(),raw=[...crypto.getRandomValues(new Uint8Array(32))].map(n=>n.toString(16).padStart(2,'0')).join('');const old=token(request);await db.batch([db.prepare('DELETE FROM sessions WHERE expires<?').bind(Date.now()),db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(old)),db.prepare('INSERT INTO sessions(token_hash,user_id,expires) VALUES(?,?,?)').bind(await hash(raw),account.id,Date.now()+30*86400000)]);return json(publicProfile(account),200,sessionCookie(raw,30*86400));}
+async function signInResponse(account:Account,request:Request){const db=database(),raw=[...crypto.getRandomValues(new Uint8Array(32))].map(n=>n.toString(16).padStart(2,'0')).join('');const old=token(request);await db.batch([db.prepare('DELETE FROM sessions WHERE expires<?').bind(Date.now()),db.prepare('DELETE FROM trusted_devices WHERE session_hash=?').bind(await hash(old)),db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(old)),db.prepare('INSERT INTO sessions(token_hash,user_id,expires) VALUES(?,?,?)').bind(await hash(raw),account.id,Date.now()+sessionLifetime*1000)]);return json(publicProfile(account),200,sessionCookie(raw,sessionLifetime));}
+async function restoreSession(request:Request){
+ const raw=token(request),account=await authenticate(request);
+ if(!account)return json(null,200,raw?sessionCookie('',0):undefined);
+ // Extend both the database session and persistent cookie on a returning visit.
+ // An expired or concurrently revoked session must never be recreated.
+ const now=Date.now(),renewed=await database().prepare('UPDATE sessions SET expires=? WHERE token_hash=? AND user_id=? AND expires>?').bind(now+sessionLifetime*1000,await hash(raw),account.id,now).run();
+ return renewed.meta.changes?json(publicProfile(account),200,sessionCookie(raw,sessionLifetime)):json(null,200,sessionCookie('',0));
+}
+type AccountDatabase=Parameters<Parameters<typeof accountTransaction>[0]>[0];
+async function nicknameMatches(db:AccountDatabase,nickname:string,password:string,excludeId=''){
+ const candidates=await db.prepare("SELECT * FROM accounts WHERE json_extract(profile,'$.nickname')=? AND id<>?").bind(nickname,excludeId).all<Account>();
+ const matches:Account[]=[];
+ for(const account of candidates.results)if(equal(await passwordHash(password,account.salt),account.password_hash))matches.push(account);
+ if(!candidates.results.length)await passwordHash(password,'gip-invalid-account');
+ return matches;
+}
+async function checkNicknameCombination(db:AccountDatabase,nickname:string,password:string,excludeId=''){
+ if((await nicknameMatches(db,nickname,password,excludeId)).length)throw new AccountError('같은 닉네임과 비밀번호 조합이 이미 있어요. 다른 닉네임이나 비밀번호를 사용해 주세요.',409);
+}
+function randomToken(){return [...crypto.getRandomValues(new Uint8Array(32))].map(n=>n.toString(16).padStart(2,'0')).join('');}
+const deviceAlgorithm={name:'ECDSA',namedCurve:'P-256'};
+const publicKeySchema=z.object({kty:z.literal('EC'),crv:z.literal('P-256'),x:z.string().regex(/^[A-Za-z0-9_-]{43}$/),y:z.string().regex(/^[A-Za-z0-9_-]{43}$/)});
+type TrustedDevice={id:string;user_id:string;public_key:string;session_hash:string;expires:number;challenge:string|null;challenge_expires:number|null};
+async function deviceRequest(request:Request,action:string){
+ const input=await body(request),id=z.string().uuid().parse(input.deviceId),db=database(),now=Date.now();
+ if(action==='device-register'){
+  const account=await authenticate(request);if(!account)throw new AccountError('다시 로그인해 주세요.',401);
+  const publicKey=publicKeySchema.parse(input.publicKey);
+  await crypto.subtle.importKey('jwk',publicKey,deviceAlgorithm,false,['verify']);
+  const key=JSON.stringify(publicKey),sessionHash=await hash(token(request));
+  const result=await db.prepare('INSERT INTO trusted_devices(id,user_id,public_key,session_hash,expires) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET session_hash=excluded.session_hash,expires=excluded.expires WHERE trusted_devices.user_id=excluded.user_id AND trusted_devices.public_key=excluded.public_key').bind(id,account.id,key,sessionHash,now+sessionLifetime*1000).run();
+  if(!result.meta.changes)throw new AccountError('기기 등록을 다시 확인해 주세요.',409);
+  await db.prepare('DELETE FROM trusted_devices WHERE expires<?').bind(now).run();
+  return json({ok:true});
+ }
+ if(action==='device-challenge'){
+  await limit(request,'device',60);
+  const challenge=randomToken();
+  const result=await db.prepare('UPDATE trusted_devices SET challenge=?,challenge_expires=? WHERE id=? AND expires>?').bind(challenge,now+60000,id,now).run();
+  if(!result.meta.changes)throw new AccountError('자동 로그인 기간이 끝났어요. 다시 로그인해 주세요.',401);
+  return json({challenge});
+ }
+ const challenge=z.string().regex(/^[a-f0-9]{64}$/).parse(input.challenge),signature=z.string().regex(/^[a-f0-9]{128}$/).parse(input.signature);
+ const device=await db.prepare('SELECT * FROM trusted_devices WHERE id=? AND challenge=? AND expires>? AND challenge_expires>?').bind(id,challenge,now,now).first<TrustedDevice>();
+ if(!device)throw new AccountError('자동 로그인을 다시 확인해 주세요.',401);
+ const key=await crypto.subtle.importKey('jwk',JSON.parse(device.public_key),deviceAlgorithm,false,['verify']);
+ const verified=await crypto.subtle.verify({name:'ECDSA',hash:'SHA-256'},key,Uint8Array.from(signature.match(/../g)!,v=>parseInt(v,16)),encoder.encode(`GIP device login:${id}:${challenge}`));
+ if(!verified)throw new AccountError('등록된 기기인지 확인하지 못했어요.',401);
+ const raw=randomToken(),sessionHash=await hash(raw);
+ const account=await accountTransaction(async transaction=>{
+  const current=Date.now(),expires=current+sessionLifetime*1000;
+  // Consume the proof once, under the same lock as session creation and logout.
+  const changed=await transaction.prepare('UPDATE trusted_devices SET challenge=NULL,challenge_expires=NULL,session_hash=?,expires=? WHERE id=? AND challenge=? AND expires>? AND challenge_expires>?').bind(sessionHash,expires,id,challenge,current,current).run();
+  if(!changed.meta.changes)throw new AccountError('자동 로그인을 다시 확인해 주세요.',401);
+  const account=await transaction.prepare('SELECT * FROM accounts WHERE id=?').bind(device.user_id).first<Account>();
+  if(!account)throw new AccountError('다시 로그인해 주세요.',401);
+  await transaction.prepare('DELETE FROM sessions WHERE token_hash=?').bind(device.session_hash).run();
+  await transaction.prepare('INSERT INTO sessions(token_hash,user_id,expires) VALUES(?,?,?)').bind(sessionHash,account.id,expires).run();
+  return account;
+ });
+ return json(publicProfile(account),200,sessionCookie(raw,sessionLifetime));
+}
 async function limit(request:Request,scope:string,max:number){const db=database(),now=Date.now(),bucket=Math.floor(now/900000),ip=request.headers.get('x-vercel-forwarded-for')?.split(',')[0]?.trim()??'unknown';const keys=[`${scope.split(':')[0]}:ip:${await hash(ip)}:${bucket}`,...(scope.includes(':')?[`${scope}:${bucket}`]:[])];for(const key of keys){const result=await db.prepare('INSERT INTO auth_limits(key,hits,expires) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET hits=hits+1 RETURNING hits').bind(key,now+1800000).first<{hits:number}>();if((result?.hits??0)>max)throw new AccountError('로그인 시도가 많아요. 15분 후 다시 시도해 주세요.',429);}await db.prepare('DELETE FROM auth_limits WHERE expires<?').bind(now).run();}
 async function body(request:Request){if(!request.headers.get('content-type')?.startsWith('application/json'))throw new AccountError('요청 형식을 확인해 주세요.',415);if(Number(request.headers.get('content-length')??0)>2200000)throw new AccountError('첨부 파일이 너무 커요.',413);const text=await request.text();if(text.length>2200000)throw new AccountError('첨부 파일이 너무 커요.',413);return JSON.parse(text);}
 function publicReview(row:Row):Review {return {...JSON.parse(row.body),...(row.photo_key?{photoData:`/api/account/photo?id=${encodeURIComponent(row.id)}`}:{})};}
@@ -28,14 +92,26 @@ export async function accountRequest(request:Request,action:string):Promise<Resp
  try {
   if(request.method==='POST'){const origin=request.headers.get('origin');if(origin&&!sameOrigin(request))throw new AccountError('허용되지 않은 요청이에요.',403);if(request.headers.get('sec-fetch-site')==='cross-site')throw new AccountError('허용되지 않은 요청이에요.',403);}
   const db=database();
-  if(action==='session'&&request.method==='GET'){const account=await authenticate(request);return json(account?publicProfile(account):null);}
+  if(action==='session'&&request.method==='GET')return await restoreSession(request);
+  if(action==='logout'&&request.method==='POST'){const raw=token(request),digest=await hash(raw);if(raw)await db.batch([db.prepare('DELETE FROM trusted_devices WHERE session_hash=?').bind(digest),db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(digest)]);return json({ok:true},200,sessionCookie('',0));}
+  if(['device-register','device-challenge','device-resume'].includes(action)&&request.method==='POST')return await deviceRequest(request,action);
   if(['signup','login','migrate'].includes(action)&&request.method==='POST'){
    const input=await body(request),password=passwordSchema.parse(input.password);
    if(action==='login'){
-    const code=codeSchema.parse(input.code);await limit(request,`login:${code}`,20);
-    const account=await db.prepare('SELECT * FROM accounts WHERE code=?').bind(code).first<Account>();
-    const computed=await passwordHash(password,account?.salt??'gip-invalid-account');
-    if(!account||!equal(computed,account.password_hash))throw new AccountError('GIP CODE 또는 비밀번호를 확인해 주세요. 기존 계정은 가입한 브라우저에서 먼저 로그인해 주세요.',401);
+    let account:Account|null=null;
+    if(input.nickname!==undefined){
+     const nickname=nicknameSchema.parse(input.nickname);await limit(request,`login:${await hash(nickname)}`,20);
+     const matches=await nicknameMatches(db,nickname,password);
+     if(matches.length>1)throw new AccountError('같은 로그인 정보가 중복돼 있어요. 로그인된 기기에서 닉네임을 변경하거나 고객센터에 문의해 주세요.',409);
+     account=matches[0]??null;
+    }else{
+     // Keep the old API for already-open clients and legacy account migration.
+     const code=codeSchema.parse(input.code);await limit(request,`login:${code}`,20);
+     const candidate=await db.prepare('SELECT * FROM accounts WHERE code=?').bind(code).first<Account>();
+     const computed=await passwordHash(password,candidate?.salt??'gip-invalid-account');
+     if(candidate&&equal(computed,candidate.password_hash))account=candidate;
+    }
+    if(!account)throw new AccountError('닉네임 또는 비밀번호를 확인해 주세요. 기존 브라우저 계정은 가입한 브라우저에서 먼저 로그인해 주세요.',401);
     return await signInResponse(account,request);
    }
    await limit(request,'signup',10);
@@ -47,18 +123,29 @@ export async function accountRequest(request:Request,action:string):Promise<Resp
     if(await db.prepare('SELECT id FROM accounts WHERE code=?').bind(code).first())throw new AccountError('이 집코드는 이미 등록되어 있어요. 기존 브라우저 기록은 그대로 보관돼요.',409);
    }
    const id=crypto.randomUUID(),salt=crypto.randomUUID(),digest=await passwordHash(password,salt);
-   for(let attempt=0;attempt<12;attempt++){
-    if(action==='signup')code=String(10000+crypto.getRandomValues(new Uint32Array(1))[0]%90000);
-    const profile:Profile={...settings,id,gipCode:code,createdAt:new Date().toISOString()};
-    const result=await db.prepare('INSERT INTO accounts(id,code,salt,password_hash,profile) VALUES(?,?,?,?,?) ON CONFLICT(code) DO NOTHING').bind(id,code,salt,digest,JSON.stringify(profile)).run();
-    if(result.meta.changes)return await signInResponse({id,code,salt,password_hash:digest,profile:JSON.stringify(profile)},request);
-    if(action==='migrate')throw new AccountError('이 집코드는 이미 등록되어 있어요.',409);
-   }
-   throw new AccountError('집코드를 만들지 못했어요. 다시 시도해 주세요.',503);
+   const account=await accountTransaction(async transaction=>{
+    await checkNicknameCombination(transaction,settings.nickname,password);
+    for(let attempt=0;attempt<12;attempt++){
+     if(action==='signup')code=String(10000+crypto.getRandomValues(new Uint32Array(1))[0]%90000);
+     const profile:Profile={...settings,id,gipCode:code,createdAt:new Date().toISOString()};
+     const result=await transaction.prepare('INSERT INTO accounts(id,code,salt,password_hash,profile) VALUES(?,?,?,?,?) ON CONFLICT(code) DO NOTHING').bind(id,code,salt,digest,JSON.stringify(profile)).run();
+     if(result.meta.changes)return {id,code,salt,password_hash:digest,profile:JSON.stringify(profile)};
+     if(action==='migrate')throw new AccountError('이 집코드는 이미 등록되어 있어요.',409);
+    }
+    throw new AccountError('집코드를 만들지 못했어요. 다시 시도해 주세요.',503);
+   });
+   return await signInResponse(account,request);
   }
   const account=await authenticate(request);if(!account)throw new AccountError('다시 로그인해 주세요.',401);
-  if(action==='logout'&&request.method==='POST'){await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await hash(token(request))).run();return json({ok:true},200,sessionCookie('',0));}
-  if(action==='profile'&&request.method==='POST'){const settings=prefs.parse(await body(request)),profile={...publicProfile(account),...settings};await db.prepare('UPDATE accounts SET profile=? WHERE id=?').bind(JSON.stringify(profile),account.id).run();return json(profile);}
+  if(action==='profile'&&request.method==='POST'){
+   const input=await body(request),settings=prefs.parse(input),before=publicProfile(account),profile={...before,...settings};
+   if(settings.nickname!==before.nickname){
+    const password=passwordSchema.parse(input.password);
+    if(!equal(await passwordHash(password,account.salt),account.password_hash))throw new AccountError('현재 비밀번호를 확인해 주세요.',401);
+    await accountTransaction(async transaction=>{await checkNicknameCombination(transaction,settings.nickname,password,account.id);await transaction.prepare('UPDATE accounts SET profile=? WHERE id=?').bind(JSON.stringify(profile),account.id).run();});
+   }else await db.prepare('UPDATE accounts SET profile=? WHERE id=?').bind(JSON.stringify(profile),account.id).run();
+   return json(profile);
+  }
   if(action==='reviews'&&request.method==='GET'){const rows=await db.prepare('SELECT * FROM reviews WHERE user_id=?').bind(account.id).all<Row>();return json(rows.results.map(publicReview));}
   if(action==='photo'&&request.method==='GET'){const id=new URL(request.url).searchParams.get('id');const row=await db.prepare('SELECT photo_key FROM reviews WHERE user_id=? AND id=?').bind(account.id,id).first<{photo_key:string|null}>();if(!row?.photo_key)throw new AccountError('사진을 찾을 수 없어요.',404);const object=await photos().get(row.photo_key);if(!object)throw new AccountError('사진을 찾을 수 없어요.',404);return new Response(object.body,{headers:{'Content-Type':object.httpMetadata?.contentType??'application/octet-stream','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});}
   if(action==='review'&&request.method==='POST'){
