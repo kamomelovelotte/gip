@@ -18,14 +18,20 @@ async function initialized(){
 }
 function result<T>(data:ResultSet){return {results:data.rows.map(row=>Object.fromEntries(data.columns.map(key=>[key,row[key]])) as T),meta:{changes:data.rowsAffected}};}
 class Statement {
-  constructor(public sql:string,public args:InValue[]=[]){ }
-  bind(...args:InValue[]){return new Statement(this.sql,args);}
-  async all<T=Record<string,unknown>>(){return result<T>(await(await initialized()).execute({sql:this.sql,args:this.args}));}
+  constructor(public sql:string,public args:InValue[]=[],private executor?:Pick<Client,'execute'>){ }
+  bind(...args:InValue[]){return new Statement(this.sql,args,this.executor);}
+  async all<T=Record<string,unknown>>(){return result<T>(await(this.executor??await initialized()).execute({sql:this.sql,args:this.args}));}
   async first<T=Record<string,unknown>>(){return (await this.all<T>()).results[0]??null;}
   async run(){return this.all();}
 }
 const store={prepare(sql:string){return new Statement(sql);},async batch(statements:Statement[]){const db=await initialized();return (await db.batch(statements.map(s=>({sql:s.sql,args:s.args})),'write')).map(r=>result<Record<string,unknown>>(r));}};
 export function database(){connection();return store;}
+export async function accountTransaction<T>(write:(db:{prepare(sql:string):Statement})=>Promise<T>){
+ const transaction=await(await initialized()).transaction('write');
+ try{const value=await write({prepare:sql=>new Statement(sql,[],transaction)});await transaction.commit();return value;}
+ catch(error){await transaction.rollback();throw error;}
+ finally{transaction.close();}
+}
 // Photos are kept in the same persistent database, so a second storage account
 // is not needed. Ownership is checked by the account route before every read.
 export function photos(){return {

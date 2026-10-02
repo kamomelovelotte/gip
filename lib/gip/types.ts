@@ -31,7 +31,7 @@ export type Profile = { id: string; gipCode: string; nickname: string; teamIds: 
 export type Review = { id: string; userId: string; kind: 'line' | 'visit'; gameId: string | null; date: string; matchup: string; venue: string; content: string; seat: string; photoData?: string; photoName?: string; createdAt: string; updatedAt: string };
 export type ReviewInput = Omit<Review, 'id' | 'userId' | 'createdAt' | 'updatedAt'>;
 export interface BaseballRepository { getTeams(): Promise<Team[]>; getGames(date: string): Promise<Game[]>; getStandings(league: League, season?: number): Promise<Standing[]>; }
-export interface UserRepository { current(): Promise<Profile | null>; signUp(nickname: string, password: string): Promise<Profile>; signIn(code: string, password: string): Promise<Profile>; signOut(): Promise<void>; update(profile: Profile): Promise<Profile>; reviews(): Promise<Review[]>; saveReview(input: ReviewInput, id?: string): Promise<Review>; deleteReview(id: string): Promise<void>; }
+export interface UserRepository { current(): Promise<Profile | null>; signUp(nickname: string, password: string): Promise<Profile>; signIn(nickname: string, password: string): Promise<Profile>; signOut(): Promise<void>; update(profile: Profile, password?: string): Promise<Profile>; reviews(): Promise<Review[]>; saveReview(input: ReviewInput, id?: string): Promise<Review>; deleteReview(id: string): Promise<void>; }
 
 export type StatPlayer={id:string;name:string;position:string;order?:string;stats:Record<string,string>};
 export type BoxscoreTeam={batters:StatPlayer[];pitchers:StatPlayer[]};
