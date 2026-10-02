@@ -24,16 +24,33 @@ export const serverUserRepository:UserRepository={
  },
  async signUp(nickname,password){const profile=await api<Profile>('signup',{nickname,password});await keepDevice(profile);return profile;},
  async signIn(nickname,password){
-  const matches:LegacyAccount[]=[];
-  for(const a of legacy()?.accounts??[])if(a.profile.nickname===nickname.trim()&&!migrated(a.profile.id)&&await verify(password,a))matches.push(a);
-  if(matches.length>1)throw Error('같은 로그인 정보의 기존 계정이 여러 개 있어요. 고객센터에 문의해 주세요.');
-  const importAccount=matches[0]??null,codeValue=importAccount?normalized(importAccount.profile.gipCode):'';
-  let profile:Profile;
-  try{profile=await api<Profile>('login',importAccount?{code:codeValue,password}:{nickname,password});}
-  catch(error){if(!(error instanceof ApiError)||error.status!==401||!importAccount)throw error;
-   profile=await api<Profile>('migrate',{code:codeValue,password,salt:importAccount.salt,digest:importAccount.digest,profile:{...importAccount.profile,leagues:importAccount.profile.leagues.map(l=>LEGACY_LEAGUE_NAMES[l]??l).filter(l=>LEAGUES.includes(l))}});
+  let profile:Profile,importAccount:LegacyAccount|null=null;
+  // A stale browser backup must never override successful server authentication.
+  try{profile=await api<Profile>('login',{nickname,password});}
+  catch(error){
+   if(!(error instanceof ApiError)||error.status!==401)throw error;
+   const matches:LegacyAccount[]=[];
+   for(const a of legacy()?.accounts??[])if(a.profile.nickname===nickname.trim()&&!migrated(a.profile.id)&&await verify(password,a).catch(()=>false))matches.push(a);
+   if(matches.length>1)throw Error('같은 로그인 정보의 기존 계정이 여러 개 있어요. 고객센터에 문의해 주세요.');
+   importAccount=matches[0]??null;
+   if(!importAccount)throw error;
+   const codeValue=normalized(importAccount.profile.gipCode);
+   try{profile=await api<Profile>('login',{code:codeValue,password});}
+   catch(codeError){
+    if(!(codeError instanceof ApiError)||codeError.status!==401)throw codeError;
+    try{profile=await api<Profile>('migrate',{code:codeValue,password,salt:importAccount.salt,digest:importAccount.digest,profile:{...importAccount.profile,leagues:importAccount.profile.leagues.map(l=>LEGACY_LEAGUE_NAMES[l]??l).filter(l=>LEAGUES.includes(l))}});}
+    catch(migrationError){
+     if(!(migrationError instanceof ApiError)||migrationError.status!==409)throw migrationError;
+     // Another device may have completed registration while this request ran.
+     profile=await api<Profile>('login',{nickname,password});
+    }
+   }
   }
-  if(importAccount){
+  if(!importAccount){
+   for(const a of legacy()?.accounts??[])if(normalized(a.profile.gipCode)===normalized(profile.gipCode)&&!migrated(a.profile.id)&&await verify(password,a).catch(()=>false)){importAccount=a;break;}
+  }
+  // Different house codes are separate identities; preserve that local backup.
+  if(importAccount&&normalized(importAccount.profile.gipCode)===normalized(profile.gipCode)){
    // Stable review IDs make interrupted transfers safe to resume. Never erase the backup.
    const existing=await api<Review[]>('reviews');
    for(const review of importAccount.reviews)if(!existing.some(r=>r.id===review.id))await api('review',{id:review.id,review});

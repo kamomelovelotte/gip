@@ -10,7 +10,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node scripts/test-vercel.cjs && node scripts/test-login.cjs && node scripts/test-official.cjs && node scripts/test-live-data.cjs && node scripts/test-relay.cjs",
+    "test": "node scripts/test-vercel.cjs && node scripts/test-login.cjs && node scripts/test-legacy-login.cjs && node scripts/test-official.cjs && node scripts/test-live-data.cjs && node scripts/test-relay.cjs",
     "db:check": "node --env-file-if-exists=.env.local scripts/check-database.mjs"
   },
   "dependencies": {
